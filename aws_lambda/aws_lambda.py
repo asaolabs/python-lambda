@@ -18,6 +18,7 @@ import boto3
 import botocore
 import pip
 import yaml
+from dotenv import load_dotenv
 
 from .helpers import archive
 from .helpers import get_environment_variable_value
@@ -180,7 +181,7 @@ def upload(
 
 def invoke(
     src, event_file='event.json',
-    config_file='config.yaml', profile_name=None,
+    config_file='config.yaml', profile_name=None, environment_file=None,
     verbose=False,
 ):
     """Simulates a call to your function.
@@ -188,8 +189,14 @@ def invoke(
     :param str src:
         The path to your Lambda ready project (folder must contain a valid
         config.yaml and handler module (e.g.: service.py).
-    :param str alt_event:
+    :param str event_file:
         An optional argument to override which event file to use.
+    :param str config_file:
+        An optional argument to override which config file to use
+    :param str profile_name:
+        An optional argument to specify which AWS profile name to use
+    :param str environment_file:
+        An optional argument to specify a .env style enviroment file to load
     :param bool verbose:
         Whether to print out verbose details.
     """
@@ -200,6 +207,10 @@ def invoke(
     # Set AWS_PROFILE environment variable based on `--profile` option.
     if profile_name:
         os.environ['AWS_PROFILE'] = profile_name
+
+    # Load an env file if specified to initialize the environment
+    if environment_file:
+        load_dotenv(environment_file)
 
     # Load environment variables from the config file into the actual
     # environment.
