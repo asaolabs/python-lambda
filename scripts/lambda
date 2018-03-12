@@ -85,13 +85,19 @@ def build(requirements, local_package, config_file, profile):
     '--profile',
     help='AWS profile to use.',
 )
+@click.option(
+    '--environment-file',
+    default=None,
+    help='.env file used to load environment before invocation'
+)
 @click.option('--verbose', '-v', is_flag=True)
-def invoke(event_file, config_file, profile, verbose):
+def invoke(event_file, config_file, profile, environment_file, verbose):
     aws_lambda.invoke(
         CURRENT_DIR,
         event_file=event_file,
         config_file=config_file,
         profile_name=profile,
+        environment_file=environment_file,
         verbose=verbose,
     )
 
