@@ -9,11 +9,12 @@ from setuptools import setup
 with open('README.rst') as readme_file:
     readme = readme_file.read()
 
-requirements = pip.req.parse_requirements(
-    'requirements.txt', session=pip.download.PipSession(),
-)
 
-pip_requirements = [str(r.req) for r in requirements]
+def read_requirements(f):
+    reqs = open(f, 'r').read().splitlines()
+    reqs = [r for r in reqs if not r.strip().startswith('#')]
+    return reqs
+
 
 # Only install futures package if using a Python version <= 2.7
 if sys.version_info < (3, 0):
@@ -38,7 +39,7 @@ setup(
     },
     include_package_data=True,
     scripts=['scripts/lambda'],
-    install_requires=pip_requirements,
+    install_requires=read_requirements('requirements.txt'),
     license='ISCL',
     zip_safe=False,
     keywords='python-lambda',
