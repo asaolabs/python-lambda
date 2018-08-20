@@ -2,19 +2,27 @@
 # -*- coding: utf-8 -*-
 import sys
 
-import pip
+try: # for pip >= 10
+    from pip._internal.req import parse_requirements
+except ImportError: # for pip <= 9.0.3
+    from pip.req import parse_requirements
+
+try: # for pip >= 10
+    from pip._internal import download
+except ImportError: # for pip <= 9.0.3
+    from pip import download
+
 from setuptools import find_packages
 from setuptools import setup
 
 with open('README.rst') as readme_file:
     readme = readme_file.read()
 
+requirements = parse_requirements(
+    'requirements.txt', session=download.PipSession(),
+)
 
-def read_requirements(f):
-    reqs = open(f, 'r').read().splitlines()
-    reqs = [r for r in reqs if not r.strip().startswith('#')]
-    return reqs
-
+pip_requirements = [str(r.req) for r in requirements]
 
 # Only install futures package if using a Python version <= 2.7
 if sys.version_info < (3, 0):
@@ -39,7 +47,7 @@ setup(
     },
     include_package_data=True,
     scripts=['scripts/lambda'],
-    install_requires=read_requirements('requirements.txt'),
+    install_requires=pip_requirements,
     license='ISCL',
     zip_safe=False,
     keywords='python-lambda',
