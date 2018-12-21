@@ -11,23 +11,26 @@ from collections import defaultdict
 from imp import load_source
 from shutil import copy
 from shutil import copyfile
+from shutil import copystat
 from shutil import copytree
 from tempfile import mkdtemp
 
 import boto3
 import botocore
-import pip
 import yaml
-from dotenv import load_dotenv
+import subprocess
 
 from .helpers import archive
 from .helpers import get_environment_variable_value
 from .helpers import mkdir
 from .helpers import read
 from .helpers import timestamp
+from .helpers import LambdaContext
 
 
 ARN_PREFIXES = {
+    'cn-north-1': 'aws-cn',
+    'cn-northwest-1': 'aws-cn',
     'us-gov-west-1': 'aws-us-gov',
 }
 
@@ -86,6 +89,7 @@ def cleanup_old_versions(
 def deploy(
         src, requirements=None, local_package=None,
         config_file='config.yaml', profile_name=None,
+        preserve_vpc=False
 ):
     """Deploys a new function to AWS Lambda.
 
@@ -112,7 +116,7 @@ def deploy(
 
     existing_config = get_function_config(cfg)
     if existing_config:
-        update_function(cfg, path_to_zip_file, existing_config)
+        update_function(cfg, path_to_zip_file, existing_config, preserve_vpc=preserve_vpc)
     else:
         create_function(cfg, path_to_zip_file)
 
@@ -120,6 +124,7 @@ def deploy(
 def deploy_s3(
     src, requirements=None, local_package=None,
     config_file='config.yaml', profile_name=None,
+    preserve_vpc=False
 ):
     """Deploys a new function via AWS S3.
 
@@ -148,7 +153,7 @@ def deploy_s3(
     existing_config = get_function_config(cfg)
     if existing_config:
         update_function(cfg, path_to_zip_file, existing_config, use_s3=use_s3,
-                        s3_file=s3_file)
+                        s3_file=s3_file, preserve_vpc=preserve_vpc)
     else:
         create_function(cfg, path_to_zip_file, use_s3=use_s3, s3_file=s3_file)
 
@@ -184,7 +189,7 @@ def upload(
 
 def invoke(
     src, event_file='event.json',
-    config_file='config.yaml', profile_name=None, environment_file=None,
+    config_file='config.yaml', profile_name=None,
     verbose=False,
 ):
     """Simulates a call to your function.
@@ -192,14 +197,8 @@ def invoke(
     :param str src:
         The path to your Lambda ready project (folder must contain a valid
         config.yaml and handler module (e.g.: service.py).
-    :param str event_file:
+    :param str alt_event:
         An optional argument to override which event file to use.
-    :param str config_file:
-        An optional argument to override which config file to use
-    :param str profile_name:
-        An optional argument to specify which AWS profile name to use
-    :param str environment_file:
-        An optional argument to specify a .env style enviroment file to load
     :param bool verbose:
         Whether to print out verbose details.
     """
@@ -210,10 +209,6 @@ def invoke(
     # Set AWS_PROFILE environment variable based on `--profile` option.
     if profile_name:
         os.environ['AWS_PROFILE'] = profile_name
-
-    # Load an env file if specified to initialize the environment
-    if environment_file:
-        load_dotenv(environment_file)
 
     # Load environment variables from the config file into the actual
     # environment.
@@ -237,11 +232,14 @@ def invoke(
     # into a function we can execute.
     fn = get_callable_handler_function(src, handler)
 
-    # TODO: look into mocking the ``context`` variable, currently being passed
-    # as None.
+    timeout = cfg.get('timeout')
+    if timeout:
+        context = LambdaContext(cfg.get('function_name'),timeout)
+    else:
+        context = LambdaContext(cfg.get('function_name'))
 
     start = time.time()
-    results = fn(event, None)
+    results = fn(event, context)
     end = time.time()
 
     print('{0}'.format(results))
@@ -357,6 +355,7 @@ def build(
 
             # Copy handler file into root of the packages folder.
             copyfile(f, os.path.join(path_to_temp, filename))
+            copystat(f, os.path.join(path_to_temp, filename))
         elif os.path.isdir(f):
             destination_folder = os.path.join(path_to_temp, f[len(src) + 1:])
             copytree(f, destination_folder)
@@ -418,12 +417,8 @@ def _install_packages(path, packages):
             package = package.replace('-e ', '')
 
         print('Installing {package}'.format(package=package))
-        pip_major_version = [int(v) for v in pip.__version__.split('.')][0]
-        if pip_major_version >= 10:
-            from pip._internal import main
-            main(['install', package, '-t', path, '--ignore-installed'])
-        else:
-            pip.main(['install', package, '-t', path, '--ignore-installed'])
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', package, '-t', path, '--ignore-installed'])
+    print ('Install directory contents are now: {directory}'.format(directory=os.listdir(path)))
 
 
 def pip_install_to_target(path, requirements=None, local_package=None):
@@ -443,12 +438,8 @@ def pip_install_to_target(path, requirements=None, local_package=None):
     packages = []
     if not requirements:
         print('Gathering pip packages')
-        pip_major_version = [int(v) for v in pip.__version__.split('.')][0]
-        if pip_major_version >= 10:
-            from pip._internal import operations
-            packages.extend(operations.freeze.freeze())
-        else:
-            packages.extend(pip.operations.freeze.freeze())
+        pkgStr = subprocess.check_output([sys.executable, '-m', 'pip', 'freeze'])
+        packages.extend(pkgStr.decode('utf-8').splitlines())
     else:
         if os.path.exists(requirements):
             print('Gathering requirement packages')
@@ -542,7 +533,7 @@ def create_function(cfg, path_to_zip_file, use_s3=False, s3_file=None):
                 'S3Bucket': '{}'.format(buck_name),
                 'S3Key': '{}'.format(s3_file),
             },
-            'Description': cfg.get('description'),
+            'Description': cfg.get('description', ''),
             'Timeout': cfg.get('timeout', 15),
             'MemorySize': cfg.get('memory_size', 512),
             'VpcConfig': {
@@ -558,7 +549,7 @@ def create_function(cfg, path_to_zip_file, use_s3=False, s3_file=None):
             'Role': role,
             'Handler': cfg.get('handler'),
             'Code': {'ZipFile': byte_stream},
-            'Description': cfg.get('description'),
+            'Description': cfg.get('description', ''),
             'Timeout': cfg.get('timeout', 15),
             'MemorySize': cfg.get('memory_size', 512),
             'VpcConfig': {
@@ -589,9 +580,13 @@ def create_function(cfg, path_to_zip_file, use_s3=False, s3_file=None):
 
     client.create_function(**kwargs)
 
+    concurrency = get_concurrency(cfg)
+    if concurrency > 0:
+        client.put_function_concurrency(FunctionName=func_name, ReservedConcurrentExecutions=concurrency)
+
 
 def update_function(
-        cfg, path_to_zip_file, existing_cfg, use_s3=False, s3_file=None
+        cfg, path_to_zip_file, existing_cfg, use_s3=False, s3_file=None, preserve_vpc=False
 ):
     """Updates the code of an existing Lambda function"""
 
@@ -640,14 +635,25 @@ def update_function(
         'Role': role,
         'Runtime': cfg.get('runtime'),
         'Handler': cfg.get('handler'),
-        'Description': cfg.get('description'),
+        'Description': cfg.get('description', ''),
         'Timeout': cfg.get('timeout', 15),
         'MemorySize': cfg.get('memory_size', 512),
-        'VpcConfig': {
+    }
+
+    if preserve_vpc:
+        kwargs['VpcConfig'] = existing_cfg.get('Configuration', {}).get('VpcConfig')
+        if kwargs['VpcConfig'] is None:
+            kwargs['VpcConfig'] = {
+                'SubnetIds': cfg.get('subnet_ids', []),
+                'SecurityGroupIds': cfg.get('security_group_ids', []),
+            }
+        else:
+            del kwargs['VpcConfig']['VpcId']
+    else:
+        kwargs['VpcConfig'] = {
             'SubnetIds': cfg.get('subnet_ids', []),
             'SecurityGroupIds': cfg.get('security_group_ids', []),
-        },
-    }
+        }
 
     if 'environment_variables' in cfg:
         kwargs.update(
@@ -661,6 +667,12 @@ def update_function(
         )
 
     ret = client.update_function_configuration(**kwargs)
+
+    concurrency = get_concurrency(cfg)
+    if concurrency > 0:
+        client.put_function_concurrency(FunctionName=cfg.get('function_name'), ReservedConcurrentExecutions=concurrency)
+    elif 'Concurrency' in existing_cfg:
+        client.delete_function_concurrency(FunctionName=cfg.get('function_name'))
 
     if 'tags' in cfg:
         tags = {
@@ -731,6 +743,12 @@ def get_function_config(cfg):
     except client.exceptions.ResourceNotFoundException as e:
         if 'Function not found' in str(e):
             return False
+
+
+def get_concurrency(cfg):
+    """Return the Reserved Concurrent Executions if present in the config"""
+    concurrency = int(cfg.get('concurrency', 0))
+    return max(0, concurrency)
 
 
 def read_cfg(path_to_config_file, profile_name):
